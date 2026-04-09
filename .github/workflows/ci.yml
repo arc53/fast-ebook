@@ -31,7 +31,10 @@ jobs:
       - run: pip install maturin pytest
       - run: python tests/fixtures/create_fixtures.py
       - run: python tests/fixtures/create_edge_cases.py
-      - run: maturin develop
+      - name: Build and install
+        run: |
+          maturin build --features python --find-interpreter
+          pip install target/wheels/*.whl
       - run: pytest tests/ -v --ignore=tests/test_epubcheck.py
 
   lint:
@@ -68,12 +71,13 @@ jobs:
           unzip -q epubcheck.zip
           echo "EPUBCHECK_JAR=$(pwd)/epubcheck-${EPUBCHECK_VERSION}/epubcheck.jar" >> $GITHUB_ENV
 
-      - name: Build fast-ebook
+      - name: Build and install
         run: |
           pip install maturin pytest
           python tests/fixtures/create_fixtures.py
           python tests/fixtures/create_edge_cases.py
-          maturin develop
+          maturin build --features python --find-interpreter
+          pip install target/wheels/*.whl
 
       - name: Run EPUBCheck validation tests
         run: pytest tests/test_epubcheck.py -v
