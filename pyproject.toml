@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.12,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fast-ebook"
+version = "0.1.0"
+description = "Rust-powered EPUB2/EPUB3 library for Python"
+license = "MIT"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "fast_ebook._fast_ebook"
+features = ["python", "pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
