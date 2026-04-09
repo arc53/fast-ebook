@@ -112,6 +112,7 @@ class TestZipStructure:
 
 class TestValidation:
     def test_missing_identifier_raises(self):
+        import io
         book = epub.EpubBook()
         book.set_title("Test")
         book.set_language("en")
@@ -120,9 +121,10 @@ class TestValidation:
         book.add_item(c1)
         book.spine = [c1]
         with pytest.raises(ValueError, match="identifier"):
-            epub.write_epub("/tmp/should_not_exist.epub", book)
+            epub.write_epub(io.BytesIO(), book)
 
     def test_missing_title_raises(self):
+        import io
         book = epub.EpubBook()
         book.set_identifier("id")
         book.set_language("en")
@@ -131,9 +133,10 @@ class TestValidation:
         book.add_item(c1)
         book.spine = [c1]
         with pytest.raises(ValueError, match="title"):
-            epub.write_epub("/tmp/should_not_exist.epub", book)
+            epub.write_epub(io.BytesIO(), book)
 
     def test_missing_language_raises(self):
+        import io
         book = epub.EpubBook()
         book.set_identifier("id")
         book.set_title("Test")
@@ -142,15 +145,16 @@ class TestValidation:
         book.add_item(c1)
         book.spine = [c1]
         with pytest.raises(ValueError, match="language"):
-            epub.write_epub("/tmp/should_not_exist.epub", book)
+            epub.write_epub(io.BytesIO(), book)
 
     def test_empty_spine_raises(self):
+        import io
         book = epub.EpubBook()
         book.set_identifier("id")
         book.set_title("Test")
         book.set_language("en")
         with pytest.raises(ValueError, match="spine"):
-            epub.write_epub("/tmp/should_not_exist.epub", book)
+            epub.write_epub(io.BytesIO(), book)
 
 
 class TestAuthors:
