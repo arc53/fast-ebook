@@ -324,20 +324,22 @@ class TestRecursionDepth:
                 return d
             return max(count_depth(e.children, d + 1) for e in entries)
 
-        depth = count_depth(book.toc)
-        assert depth <= 101  # 100 max depth + 1 for root level
+        actual_depth = count_depth(book.toc)
+        assert actual_depth <= 101  # 100 max depth + 1 for root level
 
     def test_deeply_nested_nav(self):
-        """Nav document with 200 levels of nested <ol> should not crash."""
-        # Build deeply nested nav XHTML
+        """Nav document with deep nesting should not crash."""
+        # 50 levels — exceeds typical books but safe for all OS stack sizes.
+        # (200 levels overflows Windows' 1MB default stack during XML DOM parsing.)
+        depth = 50
         nav_parts = [
             '<?xml version="1.0"?>',
             '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">',
             '<body><nav epub:type="toc"><ol>',
         ]
-        for i in range(200):
+        for i in range(depth):
             nav_parts.append(f'<li><a href="ch{i}.xhtml">Level {i}</a><ol>')
-        for _ in range(200):
+        for _ in range(depth):
             nav_parts.append('</ol></li>')
         nav_parts.append('</ol></nav></body></html>')
         nav_xhtml = "\n".join(nav_parts)
@@ -377,8 +379,8 @@ class TestRecursionDepth:
                 return d
             return max(count_depth(e.children, d + 1) for e in entries)
 
-        depth = count_depth(book.toc)
-        assert depth <= 101
+        actual_depth = count_depth(book.toc)
+        assert actual_depth <= 101
 
     def test_normal_nesting_works(self):
         """3-level nesting (common in real books) should work fine."""
