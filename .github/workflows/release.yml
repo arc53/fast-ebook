@@ -138,7 +138,7 @@ jobs:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         with:
           command: upload
-          args: --non-interactive dist/*
+          args: --non-interactive --skip-existing dist/*
 
   # Create GitHub Release with CLI binaries
   github-release:

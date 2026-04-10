@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fast-ebook"
-version = "0.1.0"
+version = "0.2.0"
 description = "Rust-powered EPUB2/EPUB3 library for Python. Fast reading, writing, validation, and markdown conversion."
 readme = "README.md"
 license = "MIT"
