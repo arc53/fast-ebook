@@ -182,3 +182,8 @@ cython_debug/
 
 # Claude
 .claude
+
+# W3C epub-tests cache (downloaded by tests/fetch_w3c_tests.py)
+tests/fixtures/w3c/
+
+bench/

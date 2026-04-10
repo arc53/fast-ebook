@@ -1,6 +1,31 @@
 # fast-ebook
 
-Rust-powered EPUB2/EPUB3 library for Python. Fast reading, writing, validation, and markdown conversion and a neat MIT license.
+[![PyPI version](https://img.shields.io/pypi/v/fast-ebook.svg)](https://pypi.org/project/fast-ebook/)
+[![Downloads](https://img.shields.io/pypi/dm/fast-ebook.svg)](https://pypi.org/project/fast-ebook/)
+[![Python versions](https://img.shields.io/pypi/pyversions/fast-ebook.svg)](https://pypi.org/project/fast-ebook/)
+[![License](https://img.shields.io/pypi/l/fast-ebook.svg)](https://github.com/arc53/fast-ebook/blob/main/LICENSE)
+[![CI](https://github.com/arc53/fast-ebook/actions/workflows/ci.yml/badge.svg)](https://github.com/arc53/fast-ebook/actions/workflows/ci.yml)
+
+Rust-powered EPUB2/EPUB3 library for Python. Fast reading, writing, validation, and markdown conversion — MIT-licensed.
+
+## How fast?
+
+Converting **War and Peace** (1.8 MB EPUB) to a single markdown document:
+
+| Library | Time | |
+|---|---:|---|
+| ebooklib + html2text | 375 ms | baseline |
+| **fast-ebook `book.to_markdown()`** | **56 ms** | **6.7x faster** |
+
+
+```python
+from fast_ebook import epub
+
+book = epub.read_epub('war_and_peace.epub')
+markdown = book.to_markdown()
+```
+
+Other operations on the same book — read+extract every chapter is **3x** faster, `get_item_with_id` is **78x** faster. Full numbers and methodology: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Installation
 
@@ -10,7 +35,23 @@ pip install fast-ebook
 
 ## Quick Start
 
-### Reading an EPUB
+## Migration from ebooklib
+
+The public API mirrors ebooklib — for most code you only need to change the import:
+
+```python
+from fast_ebook import epub
+import fast_ebook  # for ITEM_* constants
+```
+
+Or use the drop-in compatibility layer for a one-line change:
+
+```python
+import fast_ebook.compat as ebooklib
+from fast_ebook.compat import epub
+```
+
+### Read
 
 ```python
 from fast_ebook import epub
@@ -18,28 +59,20 @@ import fast_ebook
 
 book = epub.read_epub('book.epub')
 
-# Metadata
 print(book.get_metadata('DC', 'title'))
-print(book.get_metadata('DC', 'creator'))
 
-# Iterate items
-for item in book.get_items():
-    print(item.get_id(), item.get_name(), item.get_type())
-
-# Filter by type
 for img in book.get_items_of_type(fast_ebook.ITEM_IMAGE):
     print(img.get_name(), len(img.get_content()), 'bytes')
 
-# Lookup by ID or href
 item = book.get_item_with_id('chapter1')
-item = book.get_item_with_href('text/chapter1.xhtml')
 
-# Table of contents
 for entry in book.toc:
     print(entry.title, entry.href)
 ```
 
-### Writing an EPUB
+Also accepts `Path`, `bytes`, or `BytesIO`. See [docs/api.md](docs/api.md) for the full reading API, options (`lazy`, `ignore_ncx`, `ignore_nav`), and the context manager form.
+
+### Write
 
 ```python
 from fast_ebook import epub
@@ -63,164 +96,26 @@ book.spine = ['nav', c1]
 epub.write_epub('output.epub', book)
 ```
 
-### Reading from / writing to BytesIO
+### Convert to Markdown
 
 ```python
-import io
-from fast_ebook import epub
-
-# Read from bytes
-with open('book.epub', 'rb') as f:
-    book = epub.read_epub(f)
-
-# Write to BytesIO
-buf = io.BytesIO()
-epub.write_epub(buf, book)
-epub_bytes = buf.getvalue()
-
-# Read from raw bytes
-book = epub.read_epub(epub_bytes)
+md = epub.read_epub('book.epub').to_markdown()
 ```
 
-### Context Manager
+### Parallel batch read
 
 ```python
 from fast_ebook import epub
 
-with epub.open('book.epub') as book:
-    print(book.get_metadata('DC', 'title'))
+books = epub.read_epubs(['a.epub', 'b.epub', 'c.epub'], workers=4)
 ```
 
-### Parallel Batch Processing
+## Documentation
 
-Rust + Rayon gives true parallel EPUB processing with the GIL released.
-
-```python
-from pathlib import Path
-from fast_ebook import epub
-
-paths = list(Path('library/').glob('*.epub'))
-books = epub.read_epubs(paths, workers=4)
-
-for book in books:
-    title = book.get_metadata('DC', 'title')[0][0]
-    print(title)
-```
-
-### Validation
-
-```python
-from fast_ebook import epub
-
-book = epub.read_epub('book.epub')
-issues = book.validate()
-if issues:
-    for issue in issues:
-        print(f"  - {issue}")
-else:
-    print("Valid EPUB")
-```
-
-### EPUB to Markdown
-
-```python
-from fast_ebook import epub
-
-book = epub.read_epub('book.epub')
-md = book.to_markdown()
-
-# Write to file
-with open('book.md', 'w') as f:
-    f.write(md)
-```
-
-Converts the entire book to Markdown following spine order. Handles headings, bold, italic, links, lists, and HTML entities. Runs in Rust — converts War and Peace (368 chapters) in 71ms.
-
-### Read Options
-
-```python
-from fast_ebook import epub
-
-# Skip NCX parsing (EPUB2 table of contents)
-book = epub.read_epub('book.epub', options={'ignore_ncx': True})
-
-# Skip Nav document parsing (EPUB3 table of contents)
-book = epub.read_epub('book.epub', options={'ignore_nav': True})
-```
-
-## Migration from ebooklib
-
-fast-ebook's API mirrors ebooklib's public interface. For most code, you only need to change the import:
-
-```python
-# Before (ebooklib)
-from ebooklib import epub
-import ebooklib
-book = epub.read_epub('book.epub')
-for img in book.get_items_of_type(ebooklib.ITEM_IMAGE):
-    ...
-
-# After (fast-ebook)
-from fast_ebook import epub
-import fast_ebook
-book = epub.read_epub('book.epub')
-for img in book.get_items_of_type(fast_ebook.ITEM_IMAGE):
-    ...
-```
-
-Or use the compatibility layer for a one-line change:
-
-```python
-# Minimal change
-import fast_ebook.compat as ebooklib
-from fast_ebook.compat import epub
-# ... rest of your code works unchanged
-```
-
-## CLI Tool
-
-A standalone binary (no Python required) is also available:
-
-```bash
-# Print metadata
-fast-ebook info book.epub
-fast-ebook info book.epub --format json
-
-# Validate against EPUB spec
-fast-ebook validate book.epub
-fast-ebook validate *.epub --format json
-
-# Convert to Markdown
-fast-ebook convert book.epub -o book.md
-fast-ebook convert book.epub > book.md
-
-# Extract items
-fast-ebook extract book.epub --output-dir ./out
-fast-ebook extract book.epub --output-dir ./imgs --type images
-
-# Batch scan (parallel)
-fast-ebook scan library/ --workers 8
-fast-ebook scan library/ --format csv > catalog.csv
-```
-
-Install via GitHub Releases or build from source: `cargo build -p fast-ebook-cli --release`
-
-## Item Type Constants
-
-| Constant | Value |
-|----------|-------|
-| `ITEM_UNKNOWN` | 0 |
-| `ITEM_IMAGE` | 1 |
-| `ITEM_STYLE` | 2 |
-| `ITEM_SCRIPT` | 3 |
-| `ITEM_NAVIGATION` | 4 |
-| `ITEM_VECTOR` | 5 |
-| `ITEM_FONT` | 6 |
-| `ITEM_VIDEO` | 7 |
-| `ITEM_AUDIO` | 8 |
-| `ITEM_DOCUMENT` | 9 |
-| `ITEM_COVER` | 10 |
-| `ITEM_SMIL` | 11 |
+- [docs/api.md](docs/api.md) — Full Python API reference, options, item types, compat layer
+- [docs/benchmarks.md](docs/benchmarks.md) — Read/write/batch/markdown benchmarks vs ebooklib
+- [docs/architecture.md](docs/architecture.md) — How fast-ebook is built (Rust core, PyO3 bridge)
+- [docs/threat-model.md](docs/threat-model.md) — Security model for parsing untrusted EPUBs
 
 ## License
 

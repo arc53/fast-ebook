@@ -7,6 +7,8 @@ pub struct ManifestItem {
     pub href: String,
     pub media_type: String,
     pub properties: Option<String>,
+    pub media_overlay: Option<String>,
+    pub fallback: Option<String>,
 }
 
 /// Parse the <manifest> element, returning a map of id → ManifestItem.
@@ -28,6 +30,8 @@ pub fn parse_manifest(manifest_node: roxmltree::Node) -> HashMap<String, Manifes
         };
         let media_type = child.attribute("media-type").unwrap_or("").to_string();
         let properties = child.attribute("properties").map(|s| s.to_string());
+        let media_overlay = child.attribute("media-overlay").map(|s| s.to_string());
+        let fallback = child.attribute("fallback").map(|s| s.to_string());
 
         items.insert(
             id.clone(),
@@ -36,6 +40,8 @@ pub fn parse_manifest(manifest_node: roxmltree::Node) -> HashMap<String, Manifes
                 href,
                 media_type,
                 properties,
+                media_overlay,
+                fallback,
             },
         );
     }

@@ -22,6 +22,14 @@ pub struct EpubItem {
     pub href: String,
     pub media_type: String,
     pub item_type: ItemType,
+    /// OPF manifest `properties` attribute (e.g. "nav scripted mathml").
+    /// Preserved verbatim across read/write so EPUBCheck-required properties
+    /// like `scripted`, `mathml`, `svg`, `remote-resources` survive roundtrip.
+    pub properties: Option<String>,
+    /// OPF manifest `media-overlay` attribute (idref to a SMIL item).
+    pub media_overlay: Option<String>,
+    /// OPF manifest `fallback` attribute (idref chain for foreign resources).
+    pub fallback: Option<String>,
     content: OnceLock<Vec<u8>>,
     pub(crate) lazy_source: Option<LazySource>,
 }
@@ -42,6 +50,9 @@ impl EpubItem {
             href,
             media_type,
             item_type,
+            properties: None,
+            media_overlay: None,
+            fallback: None,
             content: lock,
             lazy_source: None,
         }
@@ -61,6 +72,9 @@ impl EpubItem {
             href,
             media_type,
             item_type,
+            properties: None,
+            media_overlay: None,
+            fallback: None,
             content: OnceLock::new(),
             lazy_source: Some(LazySource { zip_data, zip_path }),
         }
@@ -111,26 +125,47 @@ impl std::fmt::Debug for EpubItem {
 impl Clone for EpubItem {
     fn clone(&self) -> Self {
         // Cloning always produces an eager item with resolved content
-        EpubItem::eager(
+        let mut item = EpubItem::eager(
             self.id.clone(),
             self.href.clone(),
             self.media_type.clone(),
             self.item_type,
             self.get_content().to_vec(),
-        )
+        );
+        item.properties = self.properties.clone();
+        item.media_overlay = self.media_overlay.clone();
+        item.fallback = self.fallback.clone();
+        item
     }
 }
 
 /// A parsed EPUB book.
-#[derive(Default)]
 pub struct EpubBook {
     pub metadata: MetadataMap,
     pub items: Vec<Arc<EpubItem>>,
     pub spine: Vec<SpineItem>,
     pub toc: Vec<TocEntry>,
+    /// Source EPUB version string from `<package version="...">`. Defaults
+    /// to "3.0" for books constructed via the builder API. The writer uses
+    /// this to decide whether to emit EPUB2- or EPUB3-flavored OPF.
+    pub version: String,
     // Fast lookup indexes
     pub(crate) id_index: HashMap<String, usize>,
     pub(crate) href_index: HashMap<String, usize>,
+}
+
+impl Default for EpubBook {
+    fn default() -> Self {
+        EpubBook {
+            metadata: MetadataMap::new(),
+            items: Vec::new(),
+            spine: Vec::new(),
+            toc: Vec::new(),
+            version: "3.0".to_string(),
+            id_index: HashMap::new(),
+            href_index: HashMap::new(),
+        }
+    }
 }
 
 impl EpubBook {
@@ -140,6 +175,17 @@ impl EpubBook {
         items: Vec<Arc<EpubItem>>,
         spine: Vec<SpineItem>,
         toc: Vec<TocEntry>,
+    ) -> Self {
+        Self::new_with_version(metadata, items, spine, toc, "3.0".to_string())
+    }
+
+    /// Build a new EpubBook with an explicit source version.
+    pub fn new_with_version(
+        metadata: MetadataMap,
+        items: Vec<Arc<EpubItem>>,
+        spine: Vec<SpineItem>,
+        toc: Vec<TocEntry>,
+        version: String,
     ) -> Self {
         let mut id_index = HashMap::with_capacity(items.len());
         let mut href_index = HashMap::with_capacity(items.len());
@@ -154,6 +200,7 @@ impl EpubBook {
             items,
             spine,
             toc,
+            version,
             id_index,
             href_index,
         }

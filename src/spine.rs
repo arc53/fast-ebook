@@ -3,6 +3,9 @@
 pub struct SpineItem {
     pub idref: String,
     pub linear: bool,
+    /// `<itemref properties="...">` — preserved verbatim across roundtrip
+    /// (page-spread-left/right, rendition:layout-*, rendition:spread-*, etc.).
+    pub properties: Option<String>,
 }
 
 /// Parse the <spine> element. Returns (items, optional NCX id).
@@ -15,7 +18,12 @@ pub fn parse_spine(spine_node: roxmltree::Node) -> (Vec<SpineItem>, Option<Strin
         .filter_map(|child| {
             let idref = child.attribute("idref")?.to_string();
             let linear = child.attribute("linear").unwrap_or("yes") != "no";
-            Some(SpineItem { idref, linear })
+            let properties = child.attribute("properties").map(|s| s.to_string());
+            Some(SpineItem {
+                idref,
+                linear,
+                properties,
+            })
         })
         .collect();
 

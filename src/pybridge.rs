@@ -203,14 +203,15 @@ impl PyEpubBook {
                 it = ItemType::Cover;
             }
         }
-        let item = Arc::new(EpubItem::eager(
+        let mut item = EpubItem::eager(
             id.to_string(),
             href.to_string(),
             media_type.to_string(),
             it,
             content,
-        ));
-        self.inner.add_item(item);
+        );
+        item.properties = properties.map(|s| s.to_string());
+        self.inner.add_item(Arc::new(item));
     }
 
     /// Set the cover image.
@@ -237,7 +238,11 @@ impl PyEpubBook {
     fn _set_spine_from_entries(&mut self, entries: Vec<(String, bool)>) {
         self.inner.spine = entries
             .into_iter()
-            .map(|(idref, linear)| SpineItem { idref, linear })
+            .map(|(idref, linear)| SpineItem {
+                idref,
+                linear,
+                properties: None,
+            })
             .collect();
     }
 }
@@ -293,7 +298,7 @@ impl PyEpubItem {
     }
 }
 
-#[pyclass(name = "TocEntry")]
+#[pyclass(name = "TocEntry", from_py_object)]
 #[derive(Clone)]
 pub struct PyTocEntry {
     #[pyo3(get)]

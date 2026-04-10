@@ -6,7 +6,9 @@ use zip::CompressionMethod;
 
 use crate::errors::EpubError;
 use crate::item_type::ItemType;
+use crate::metadata::MetadataItem;
 use crate::model::EpubBook;
+use crate::reader::resolve_relative;
 
 const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
@@ -51,41 +53,60 @@ fn write_epub_inner<W: Write + Seek>(writer: W, book: &EpubBook) -> Result<W, Ep
         .items
         .iter()
         .any(|i| i.media_type == "application/x-dtbncx+xml");
-    let opf = generate_opf(book, has_ncx);
+    // EPUB3 requires exactly one manifest item with the `nav` property. If
+    // the source book is being written as EPUB3 and has no nav item (e.g.
+    // an EPUB2 input that had only NCX, or a Python builder that forgot to
+    // add EpubNav()), synthesize one from book.toc so the output remains
+    // EPUB3-conformant. EPUB2 outputs intentionally skip this so they
+    // round-trip losslessly.
+    let writing_epub3 = !book.version.starts_with('2');
+    let synth_nav = writing_epub3
+        && !book.items.iter().any(|i| {
+            i.item_type == ItemType::Navigation && i.media_type == "application/xhtml+xml"
+        });
+    let opf = generate_opf(book, has_ncx, synth_nav);
     zip.start_file("EPUB/content.opf", opts_deflated)?;
     zip.write_all(opf.as_bytes())?;
 
-    // 4. NCX (auto-generated from toc)
-    if has_ncx {
-        let identifier = book.get_metadata_value("DC", "identifier").unwrap_or("");
-        let ncx = generate_ncx(book, identifier);
-        zip.start_file("EPUB/toc.ncx", opts_deflated)?;
-        zip.write_all(ncx.as_bytes())?;
+    // 4. Items. Nav and NCX content is auto-generated from `book.toc` *only*
+    // when the source item has empty content (the Python builder sentinels
+    // EpubNav() / EpubNcx()). On read+write roundtrip the original bytes are
+    // preserved verbatim, which is required for EPUBCheck to accept the
+    // result — the auto-generated nav can drop properties like image-only
+    // anchors that the spec considers valid.
+    let identifier = book.get_metadata_value("DC", "identifier").unwrap_or("");
+    let mut generated_nav: Option<Vec<u8>> = None;
+    let mut generated_ncx: Option<Vec<u8>> = None;
+    for item in &book.items {
+        // Resolve item href against the OPF directory ("EPUB/"), normalizing
+        // `..` segments so items hosted outside the OPF directory (e.g.
+        // "../media/img.jpg") land at their canonical zip location.
+        let zip_path = resolve_relative("EPUB/", &item.href);
+        let content = item.get_content();
+
+        let bytes: &[u8] = if content.is_empty() && item.media_type == "application/x-dtbncx+xml" {
+            let ncx =
+                generated_ncx.get_or_insert_with(|| generate_ncx(book, identifier).into_bytes());
+            ncx.as_slice()
+        } else if content.is_empty()
+            && item.item_type == ItemType::Navigation
+            && item.media_type == "application/xhtml+xml"
+        {
+            let nav = generated_nav.get_or_insert_with(|| generate_nav(book).into_bytes());
+            nav.as_slice()
+        } else {
+            content
+        };
+
+        zip.start_file(zip_path, opts_deflated)?;
+        zip.write_all(bytes)?;
     }
 
-    // 5. Nav (auto-generated from toc)
-    let has_nav = book
-        .items
-        .iter()
-        .any(|i| i.item_type == ItemType::Navigation && i.media_type == "application/xhtml+xml");
-    if has_nav {
+    // Synthetic Nav doc (only when the source book had no nav item).
+    if synth_nav {
         let nav = generate_nav(book);
         zip.start_file("EPUB/nav.xhtml", opts_deflated)?;
         zip.write_all(nav.as_bytes())?;
-    }
-
-    // 6. All other items
-    for item in &book.items {
-        // Skip auto-generated NCX and Nav
-        if item.media_type == "application/x-dtbncx+xml" {
-            continue;
-        }
-        if item.item_type == ItemType::Navigation && item.media_type == "application/xhtml+xml" {
-            continue;
-        }
-        let zip_path = format!("EPUB/{}", item.href);
-        zip.start_file(zip_path, opts_deflated)?;
-        zip.write_all(item.get_content())?;
     }
 
     let writer = zip.finish()?;
@@ -110,49 +131,95 @@ fn validate_for_write(book: &EpubBook) -> Result<(), EpubError> {
 }
 
 /// Generate the OPF package document XML.
-fn generate_opf(book: &EpubBook, has_ncx: bool) -> String {
+fn generate_opf(book: &EpubBook, has_ncx: bool, synth_nav: bool) -> String {
     // Estimate capacity: ~120 bytes per item + metadata overhead
     let mut opf = String::with_capacity(512 + book.items.len() * 120);
-    opf.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-        <package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\">\n\
-        \x20\x20<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n");
+    let writing_epub3 = !book.version.starts_with('2');
+    let pkg_version = if writing_epub3 { "3.0" } else { "2.0" };
 
-    // DC metadata
+    // The unique-identifier on <package> must reference the id attribute on
+    // the corresponding <dc:identifier>. Reuse the captured id if present so
+    // metadata `<meta refines="#that-id">` refinements still resolve;
+    // otherwise fall back to a synthesized "BookId".
+    let identifier_id = book
+        .metadata
+        .get("DC")
+        .and_then(|dc| dc.get("identifier"))
+        .and_then(|ids| ids.first())
+        .and_then(|item| item.attributes.get("id").cloned())
+        .filter(|s| is_safe_xml_name(s))
+        .unwrap_or_else(|| "BookId".to_string());
+
+    opf.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    opf.push_str("<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"");
+    opf.push_str(pkg_version);
+    opf.push_str("\" unique-identifier=\"");
+    xml_escape_into(&mut opf, &identifier_id);
+    opf.push_str("\">\n  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n");
+
+    // DC metadata. Captured attributes are echoed verbatim, with two
+    // EPUB3-specific transforms: opf:role / opf:file-as / opf:event /
+    // opf:scheme attributes (illegal on EPUB3 dc:* elements) are stripped
+    // and emitted as `<meta refines="#dc-id" property="...">value</meta>`
+    // refinements instead, generating an id for the dc element if needed.
+    let mut pending_refines: Vec<(String, String, String)> = Vec::new();
+    let mut id_counter: u32 = 0;
     if let Some(dc) = book.metadata.get("DC") {
         if let Some(ids) = dc.get("identifier") {
-            for item in ids {
-                opf.push_str("    <dc:identifier id=\"BookId\">");
-                xml_escape_into(&mut opf, &item.value);
-                opf.push_str("</dc:identifier>\n");
+            for (i, item) in ids.iter().enumerate() {
+                let id = if i == 0 {
+                    Some(identifier_id.as_str())
+                } else {
+                    item.attributes.get("id").map(|s| s.as_str())
+                };
+                write_dc_element(
+                    &mut opf,
+                    "identifier",
+                    item,
+                    id,
+                    writing_epub3,
+                    &mut pending_refines,
+                    &mut id_counter,
+                );
             }
         }
         if let Some(titles) = dc.get("title") {
             for item in titles {
-                opf.push_str("    <dc:title>");
-                xml_escape_into(&mut opf, &item.value);
-                opf.push_str("</dc:title>\n");
+                write_dc_element(
+                    &mut opf,
+                    "title",
+                    item,
+                    None,
+                    writing_epub3,
+                    &mut pending_refines,
+                    &mut id_counter,
+                );
             }
         }
         if let Some(langs) = dc.get("language") {
             for item in langs {
-                opf.push_str("    <dc:language>");
-                xml_escape_into(&mut opf, &item.value);
-                opf.push_str("</dc:language>\n");
+                write_dc_element(
+                    &mut opf,
+                    "language",
+                    item,
+                    None,
+                    writing_epub3,
+                    &mut pending_refines,
+                    &mut id_counter,
+                );
             }
         }
         if let Some(creators) = dc.get("creator") {
             for item in creators {
-                opf.push_str("    <dc:creator");
-                for (k, v) in &item.attributes {
-                    opf.push(' ');
-                    xml_escape_into(&mut opf, k);
-                    opf.push_str("=\"");
-                    xml_escape_into(&mut opf, v);
-                    opf.push('"');
-                }
-                opf.push('>');
-                xml_escape_into(&mut opf, &item.value);
-                opf.push_str("</dc:creator>\n");
+                write_dc_element(
+                    &mut opf,
+                    "creator",
+                    item,
+                    None,
+                    writing_epub3,
+                    &mut pending_refines,
+                    &mut id_counter,
+                );
             }
         }
         for (field, items) in dc {
@@ -162,52 +229,73 @@ fn generate_opf(book: &EpubBook, has_ncx: bool) -> String {
             ) {
                 continue;
             }
+            if !is_safe_xml_name(field) {
+                continue;
+            }
             for item in items {
-                if !is_safe_xml_name(field) {
-                    continue; // skip fields with unsafe names
-                }
-                opf.push_str("    <dc:");
-                opf.push_str(field);
-                opf.push('>');
-                xml_escape_into(&mut opf, &item.value);
-                opf.push_str("</dc:");
-                opf.push_str(field);
-                opf.push_str(">\n");
+                write_dc_element(
+                    &mut opf,
+                    field,
+                    item,
+                    None,
+                    writing_epub3,
+                    &mut pending_refines,
+                    &mut id_counter,
+                );
             }
         }
     }
 
-    // dcterms:modified (required by EPUB3) — only add if not already present
-    let has_modified = book
-        .metadata
-        .get("OPF")
-        .and_then(|m| m.get("dcterms:modified"))
-        .is_some_and(|v| !v.is_empty());
-    if !has_modified {
-        opf.push_str("    <meta property=\"dcterms:modified\">");
-        opf.push_str(&current_utc_timestamp());
+    // EPUB3 refines metadata synthesized from opf:* attrs on DC elements.
+    for (target_id, property, value) in &pending_refines {
+        opf.push_str("    <meta refines=\"#");
+        xml_escape_into(&mut opf, target_id);
+        opf.push_str("\" property=\"");
+        xml_escape_into(&mut opf, property);
+        opf.push_str("\">");
+        xml_escape_into(&mut opf, value);
         opf.push_str("</meta>\n");
     }
 
-    // OPF metadata
+    // dcterms:modified is required by EPUB3 only — skip when writing EPUB2.
+    if writing_epub3 {
+        let has_modified = book
+            .metadata
+            .get("OPF")
+            .and_then(|m| m.get("dcterms:modified"))
+            .is_some_and(|v| !v.is_empty());
+        if !has_modified {
+            opf.push_str("    <meta property=\"dcterms:modified\">");
+            opf.push_str(&current_utc_timestamp());
+            opf.push_str("</meta>\n");
+        }
+    }
+
+    // OPF metadata. We emit all attributes captured at parse time so that
+    // EPUB3 refinements (`refines`, `id`, `scheme`, etc.) survive round-trip
+    // — EPUBCheck enforces these for things like `media:duration`,
+    // `dcterms:modified`, and DCMES element refinements.
     if let Some(opf_meta) = book.metadata.get("OPF") {
         for (name, items) in opf_meta {
             if !is_safe_xml_name(name) {
                 continue; // skip meta entries with unsafe names
             }
             for item in items {
-                if name.contains(':') {
-                    opf.push_str("    <meta property=\"");
-                    xml_escape_into(&mut opf, name);
-                    opf.push_str("\">");
-                    xml_escape_into(&mut opf, &item.value);
-                    opf.push_str("</meta>\n");
+                // Pick the serialization form from the captured attributes:
+                // EPUB3 metas have a `property` attribute, EPUB2 metas have
+                // `name` + `content`. The hash key may not contain ':' even
+                // for EPUB3 (e.g. property="belongs-to-collection").
+                if item.attributes.contains_key("property") {
+                    write_epub3_meta(&mut opf, name, item);
+                } else if item.attributes.contains_key("name")
+                    || item.attributes.contains_key("content")
+                {
+                    write_epub2_meta(&mut opf, name, item);
+                } else if name.contains(':') {
+                    // Fall back: synthesized via Python add_metadata("OPF", "ns:foo", v)
+                    write_epub3_meta(&mut opf, name, item);
                 } else {
-                    opf.push_str("    <meta name=\"");
-                    xml_escape_into(&mut opf, name);
-                    opf.push_str("\" content=\"");
-                    xml_escape_into(&mut opf, &item.value);
-                    opf.push_str("\"/>\n");
+                    write_epub2_meta(&mut opf, name, item);
                 }
             }
         }
@@ -215,7 +303,10 @@ fn generate_opf(book: &EpubBook, has_ncx: bool) -> String {
 
     opf.push_str("  </metadata>\n  <manifest>\n");
 
-    // Manifest
+    // Manifest. Properties / media-overlay / fallback are emitted verbatim
+    // from the source item if present (required for EPUBCheck round-trip);
+    // otherwise we synthesize the minimum needed for items built via the
+    // Python builder API (cover-image, nav).
     for item in &book.items {
         opf.push_str("    <item id=\"");
         xml_escape_into(&mut opf, &item.id);
@@ -224,14 +315,40 @@ fn generate_opf(book: &EpubBook, has_ncx: bool) -> String {
         opf.push_str("\" media-type=\"");
         xml_escape_into(&mut opf, &item.media_type);
         opf.push('"');
-        match item.item_type {
-            ItemType::Cover => opf.push_str(" properties=\"cover-image\""),
-            ItemType::Navigation if item.media_type == "application/xhtml+xml" => {
-                opf.push_str(" properties=\"nav\"")
-            }
-            _ => {}
+
+        let synthesized_properties = match item.item_type {
+            ItemType::Cover => Some("cover-image"),
+            ItemType::Navigation if item.media_type == "application/xhtml+xml" => Some("nav"),
+            _ => None,
+        };
+        if let Some(props) = item.properties.as_deref() {
+            opf.push_str(" properties=\"");
+            xml_escape_into(&mut opf, props);
+            opf.push('"');
+        } else if let Some(props) = synthesized_properties {
+            opf.push_str(" properties=\"");
+            opf.push_str(props);
+            opf.push('"');
         }
+
+        if let Some(mo) = item.media_overlay.as_deref() {
+            opf.push_str(" media-overlay=\"");
+            xml_escape_into(&mut opf, mo);
+            opf.push('"');
+        }
+        if let Some(fb) = item.fallback.as_deref() {
+            opf.push_str(" fallback=\"");
+            xml_escape_into(&mut opf, fb);
+            opf.push('"');
+        }
+
         opf.push_str("/>\n");
+    }
+
+    if synth_nav {
+        opf.push_str(
+            "    <item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n",
+        );
     }
 
     opf.push_str("  </manifest>\n  <spine");
@@ -256,6 +373,11 @@ fn generate_opf(book: &EpubBook, has_ncx: bool) -> String {
         opf.push('"');
         if !entry.linear {
             opf.push_str(" linear=\"no\"");
+        }
+        if let Some(props) = entry.properties.as_deref() {
+            opf.push_str(" properties=\"");
+            xml_escape_into(&mut opf, props);
+            opf.push('"');
         }
         opf.push_str("/>\n");
     }
@@ -392,6 +514,168 @@ fn write_indent(buf: &mut String, level: usize) {
     }
 }
 
+/// Whether `attr_name` is legal on a DC element under EPUB 3. EPUB2-only
+/// `opf:*` refinements (role, file-as, event, scheme) are rejected by
+/// EPUBCheck on the EPUB3 schema and must be converted to refines metadata.
+fn is_epub3_dc_attr(name: &str) -> bool {
+    matches!(name, "id" | "dir" | "xml:lang")
+}
+
+/// Emit a `<dc:{tag}>` element.
+///
+/// On EPUB3 output, opf:role / opf:file-as / opf:event / opf:scheme are
+/// extracted from the captured attributes and queued in `pending_refines`
+/// as `<meta refines="#dc-id" property="role">val</meta>` synthesizations,
+/// auto-generating an id for the DC element when needed. EPUB2 output
+/// emits the opf:* attributes verbatim (legal in the EPUB2 schema).
+///
+/// If `override_id` is Some, the `id` attribute uses that value (used for
+/// the primary `<dc:identifier>` so it stays in sync with `unique-identifier`).
+fn write_dc_element(
+    opf: &mut String,
+    tag: &str,
+    item: &MetadataItem,
+    override_id: Option<&str>,
+    writing_epub3: bool,
+    pending_refines: &mut Vec<(String, String, String)>,
+    id_counter: &mut u32,
+) {
+    // Decide whether this element needs an id (either it had one, or we
+    // need one to anchor refines metas synthesized from opf:* attrs).
+    let needs_refines_id = writing_epub3
+        && item.attributes.keys().any(|k| {
+            matches!(
+                k.as_str(),
+                "opf:role" | "opf:file-as" | "opf:event" | "opf:scheme"
+            )
+        });
+    let resolved_id: Option<String> = if let Some(id) = override_id {
+        Some(id.to_string())
+    } else if let Some(id) = item.attributes.get("id") {
+        Some(id.clone())
+    } else if needs_refines_id {
+        *id_counter += 1;
+        Some(format!("dc-id-{}", id_counter))
+    } else {
+        None
+    };
+
+    opf.push_str("    <dc:");
+    opf.push_str(tag);
+
+    let mut keys: Vec<&String> = item.attributes.keys().collect();
+    keys.sort();
+    for k in keys {
+        if !is_safe_xml_name(k) {
+            continue;
+        }
+        // The id attribute is always handled via resolved_id below.
+        if k == "id" {
+            continue;
+        }
+        // EPUB3 strips opf:* refinements (emitted as refines metas instead).
+        if writing_epub3 && !is_epub3_dc_attr(k) {
+            if let Some(prop) = k.strip_prefix("opf:") {
+                if matches!(prop, "role" | "file-as" | "event" | "scheme") {
+                    if let Some(target) = resolved_id.as_ref() {
+                        pending_refines.push((
+                            target.clone(),
+                            prop.to_string(),
+                            item.attributes[k].clone(),
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        let v = &item.attributes[k];
+        opf.push(' ');
+        xml_escape_into(opf, k);
+        opf.push_str("=\"");
+        xml_escape_into(opf, v);
+        opf.push('"');
+    }
+    if let Some(id) = resolved_id.as_deref() {
+        opf.push_str(" id=\"");
+        xml_escape_into(opf, id);
+        opf.push('"');
+    }
+    opf.push('>');
+    xml_escape_into(opf, &item.value);
+    opf.push_str("</dc:");
+    opf.push_str(tag);
+    opf.push_str(">\n");
+}
+
+/// Emit an EPUB3-style `<meta property="...">value</meta>` element, echoing
+/// any captured attributes (refines, id, scheme, ...).
+fn write_epub3_meta(opf: &mut String, property_name: &str, item: &MetadataItem) {
+    opf.push_str("    <meta");
+    let mut emitted_property = false;
+    let mut keys: Vec<&String> = item.attributes.keys().collect();
+    keys.sort(); // deterministic output
+    for k in keys {
+        if !is_safe_xml_name(k) {
+            continue;
+        }
+        let v = &item.attributes[k];
+        opf.push(' ');
+        xml_escape_into(opf, k);
+        opf.push_str("=\"");
+        xml_escape_into(opf, v);
+        opf.push('"');
+        if k == "property" {
+            emitted_property = true;
+        }
+    }
+    if !emitted_property {
+        opf.push_str(" property=\"");
+        xml_escape_into(opf, property_name);
+        opf.push('"');
+    }
+    opf.push('>');
+    xml_escape_into(opf, &item.value);
+    opf.push_str("</meta>\n");
+}
+
+/// Emit an EPUB2-style `<meta name="..." content="..."/>` element, echoing
+/// any extra captured attributes.
+fn write_epub2_meta(opf: &mut String, meta_name: &str, item: &MetadataItem) {
+    opf.push_str("    <meta");
+    let mut emitted_name = false;
+    let mut emitted_content = false;
+    let mut keys: Vec<&String> = item.attributes.keys().collect();
+    keys.sort();
+    for k in keys {
+        if !is_safe_xml_name(k) {
+            continue;
+        }
+        let v = &item.attributes[k];
+        opf.push(' ');
+        xml_escape_into(opf, k);
+        opf.push_str("=\"");
+        xml_escape_into(opf, v);
+        opf.push('"');
+        if k == "name" {
+            emitted_name = true;
+        }
+        if k == "content" {
+            emitted_content = true;
+        }
+    }
+    if !emitted_name {
+        opf.push_str(" name=\"");
+        xml_escape_into(opf, meta_name);
+        opf.push('"');
+    }
+    if !emitted_content {
+        opf.push_str(" content=\"");
+        xml_escape_into(opf, &item.value);
+        opf.push('"');
+    }
+    opf.push_str("/>\n");
+}
+
 /// Check if a string is a safe XML element/attribute name.
 /// Only allows alphanumeric, hyphens, underscores, dots, and colons (for namespaces).
 #[inline]
@@ -500,6 +784,7 @@ mod tests {
         book.spine = vec![SpineItem {
             idref: "ch1".to_string(),
             linear: true,
+            properties: None,
         }];
 
         book.toc = vec![TocEntry {
@@ -514,7 +799,7 @@ mod tests {
     #[test]
     fn test_generate_opf_contains_required_elements() {
         let book = make_test_book();
-        let opf = generate_opf(&book, true);
+        let opf = generate_opf(&book, true, false);
         assert!(opf.contains("<dc:identifier"));
         assert!(opf.contains("test-id-001"));
         assert!(opf.contains("<dc:title>Test Book</dc:title>"));
@@ -581,6 +866,7 @@ mod tests {
         book.spine = vec![SpineItem {
             idref: "ch1".to_string(),
             linear: true,
+            properties: None,
         }];
         assert!(matches!(
             validate_for_write(&book),

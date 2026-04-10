@@ -179,3 +179,31 @@ class TestEpubCheckRoundtrip:
 
         ok, output = run_epubcheck(str(out))
         assert ok, f"EPUBCheck failed:\n{output}"
+
+
+# Parametrized roundtrip across every well-formed fixture in tests/fixtures/.
+# Skipped automatically (alongside the rest of this module) when EPUBCheck
+# isn't installed. Negative fixtures (missing metadata, no spine, etc.) are
+# excluded since they intentionally fail validation.
+from pathlib import Path  # noqa: E402
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_VALID_FIXTURES = [
+    _FIXTURES / "minimal_epub2.epub",
+    _FIXTURES / "minimal_epub3.epub",
+    _FIXTURES / "multi_chapter.epub",
+    _FIXTURES / "nested_toc.epub",
+]
+
+
+@pytest.mark.parametrize(
+    "fixture", _VALID_FIXTURES, ids=lambda p: p.stem
+)
+def test_roundtrip_all_fixtures(fixture, tmp_path):
+    """Roundtrip every valid fixture and validate the output with EPUBCheck."""
+    book = epub.read_epub(str(fixture))
+    out = tmp_path / f"{fixture.stem}_roundtrip.epub"
+    epub.write_epub(str(out), book)
+
+    ok, output = run_epubcheck(str(out))
+    assert ok, f"EPUBCheck failed for {fixture.name}:\n{output}"

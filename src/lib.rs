@@ -88,7 +88,7 @@ mod python_bindings {
             lazy: false,
         };
 
-        let results = py.allow_threads(|| batch::read_epubs_parallel(&paths, &opts, workers));
+        let results = py.detach(|| batch::read_epubs_parallel(&paths, &opts, workers));
 
         let mut books = Vec::with_capacity(results.len());
         for result in results {

@@ -92,6 +92,7 @@ mod tests {
         book.spine = vec![SpineItem {
             idref: "ch1".to_string(),
             linear: true,
+            properties: None,
         }];
         book
     }
@@ -116,6 +117,7 @@ mod tests {
         book.spine.push(SpineItem {
             idref: "nonexistent".to_string(),
             linear: true,
+            properties: None,
         });
         let issues = validate(&book);
         assert!(issues.iter().any(|i| i.contains("nonexistent")));
