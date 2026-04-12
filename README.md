@@ -1,7 +1,6 @@
 # fast-ebook
 
 [![PyPI version](https://img.shields.io/pypi/v/fast-ebook.svg)](https://pypi.org/project/fast-ebook/)
-[![License](https://img.shields.io/pypi/l/fast-ebook.svg)](https://github.com/arc53/fast-ebook/blob/main/LICENSE)
 [![CI](https://github.com/arc53/fast-ebook/actions/workflows/ci.yml/badge.svg)](https://github.com/arc53/fast-ebook/actions/workflows/ci.yml)
 
 Rust-powered EPUB2/EPUB3 library for Python. Fast reading, writing, validation, and markdown conversion — MIT-licensed.
